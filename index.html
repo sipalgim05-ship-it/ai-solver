@@ -152,7 +152,8 @@
 
                 <!-- 카메라 뷰파인더 가이드라인 (카메라 활성 상태일 때만 표시) -->
                 <div id="viewfinderOverlay" class="absolute inset-0 pointer-events-none flex items-center justify-center">
-                    <div class="w-4/5 h-3/5 border-2 border-white/50 rounded-2xl relative">
+                    <!-- 바깥 영역 살짝 어둡게 처리해 상자 영역 강조 -->
+                    <div id="scanGuideBox" class="w-4/5 h-3/5 border-2 border-white/70 rounded-2xl relative shadow-[0_0_0_9999px_rgba(15,23,42,0.45)]">
                         <!-- 모서리 강조 -->
                         <div class="absolute -top-0.5 -left-0.5 w-6 h-6 border-t-4 border-l-4 border-blue-400 rounded-tl-xl"></div>
                         <div class="absolute -top-0.5 -right-0.5 w-6 h-6 border-t-4 border-r-4 border-blue-400 rounded-tr-xl"></div>
@@ -161,8 +162,8 @@
                         <!-- 스캔 애니메이션 라인 -->
                         <div class="scanner-line"></div>
                     </div>
-                    <span class="absolute bottom-3 bg-black/60 text-white text-xs px-3 py-1 rounded-full backdrop-blur-sm">
-                        문제가 사각형 안에 잘 들어오도록 비춰주세요
+                    <span class="absolute bottom-3 bg-black/70 text-white text-xs px-3 py-1 rounded-full backdrop-blur-sm">
+                        네모 상자 안에 들어온 부분만 잘라서 촬영됩니다
                     </span>
                     <!-- 실시간 자동 스캔 진행 바 (비추기만 할 때 동작) -->
                     <div id="autoScanStatus" class="hidden absolute top-3 left-3 bg-black/70 text-white text-xs px-3 py-1.5 rounded-full backdrop-blur-md flex items-center gap-2 border border-white/10">
@@ -226,14 +227,14 @@
                 <i data-lucide="brain-circuit" class="w-6 h-6 text-blue-600 absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2"></i>
             </div>
             <h3 class="font-bold text-slate-800 text-lg mb-1">Gemini AI가 문제를 분석하고 있어요</h3>
-            <p class="text-sm text-slate-500">손글씨와 수식을 읽고 단계별 풀이를 작성 중입니다...</p>
+            <p class="text-sm text-slate-500">문제를 읽고 단계별 풀이를 작성 중입니다...</p>
         </section>
 
         <!-- 3. AI 풀이 결과 영역 -->
         <section id="resultSection" class="hidden bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden mb-8">
             <div class="bg-gradient-to-r from-blue-50 to-indigo-50 px-5 py-3.5 border-b border-blue-100 flex items-center justify-between">
                 <div class="flex items-center gap-2">
-                    <span class="bg-blue-600 text-white text-xs font-bold px-2.5 py-1 rounded-lg">AI 해설</span>
+                    <span class="bg-blue-600 text-white text-xs font-bold px-2.5 py-1 rounded-lg">해설</span>
                     <h2 class="font-bold text-slate-800 text-base">풀이 과정 및 정답</h2>
                 </div>
                 <button id="btnCopyResult" class="text-xs font-medium text-slate-600 hover:text-blue-600 bg-white border border-slate-200 px-3 py-1.5 rounded-lg shadow-sm flex items-center gap-1.5 transition active:scale-95">
@@ -257,6 +258,7 @@
         const capturedImage = document.getElementById('capturedImage');
         const cameraFallback = document.getElementById('cameraFallback');
         const viewfinderOverlay = document.getElementById('viewfinderOverlay');
+        const scanGuideBox = document.getElementById('scanGuideBox');
         const captureCanvas = document.getElementById('captureCanvas');
         
         const btnSwitchCamera = document.getElementById('btnSwitchCamera');
@@ -291,7 +293,7 @@
         // API 키 자동 저장용 스토리지 키
         const API_KEY_STORAGE_KEY = 'gemini_smart_scanner_api_key';
 
-        // 로컬 스토리지 헬퍼 함수 (시크릿 모드 등 스토리지 차단 환경 예외 처리)
+        // 로컬 스토리지 헬퍼 함수
         function loadSavedApiKey() {
             try {
                 return localStorage.getItem(API_KEY_STORAGE_KEY) || '';
@@ -468,7 +470,7 @@
 
         /**
          * 실시간 움직임 감지 기반 자동 스캔 루프 시작
-         * 카메라 화면이 일정 시간(약 1.6초) 흔들림 없이 고정되면 문제를 비춘 것으로 판단해 자동 캡처 후 풀이 실행
+         * 네모 상자 내부 영역의 움직임만 감지하여 고정 시 자동 캡처
          */
         function startAutoScanLoop() {
             stopAutoScanLoop();
@@ -484,8 +486,13 @@
             autoScanTimer = setInterval(() => {
                 if (!currentStream || videoPreview.readyState < 2) return;
 
-                // 저해상도 캔버스에 현재 프레임 그리기
-                motionCtx.drawImage(videoPreview, 0, 0, 64, 48);
+                // 가이드 상자 영역만 추출하여 움직임 분석
+                const crop = calculateGuideBoxCrop();
+                if (crop) {
+                    motionCtx.drawImage(videoPreview, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, 64, 48);
+                } else {
+                    motionCtx.drawImage(videoPreview, 0, 0, 64, 48);
+                }
                 const currentFrame = motionCtx.getImageData(0, 0, 64, 48).data;
 
                 if (previousFrameData) {
@@ -513,11 +520,10 @@
 
                         if (steadyCount >= STEADY_THRESHOLD) {
                             stopAutoScanLoop();
-                            showToast('문제가 감지되어 자동으로 풀이를 시작합니다!', 'success');
-                            captureCurrentFrame(true); // 자동 풀이 실행 플래그 true
+                            showToast('상자 안의 문제가 감지되어 풀이를 시작합니다!', 'success');
+                            captureCurrentFrame(true);
                         }
                     } else {
-                        // 카메라가 움직이면 카운트 초기화
                         steadyCount = 0;
                         autoScanDot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
                         autoScanText.textContent = '문제를 비추면 자동 인식됩니다';
@@ -548,7 +554,68 @@
         });
 
         /**
-         * 현재 비디오 화면 캡처 공통 함수
+         * 화면의 네모 상자(scanGuideBox)에 해당하는 실제 비디오 원본 좌표(sx, sy, sw, sh) 계산
+         * object-cover 비율 보정 포함
+         */
+        function calculateGuideBoxCrop() {
+            const videoWidth = videoPreview.videoWidth;
+            const videoHeight = videoPreview.videoHeight;
+            if (!videoWidth || !videoHeight) return null;
+
+            const videoRect = videoPreview.getBoundingClientRect();
+            const boxRect = scanGuideBox.getBoundingClientRect();
+
+            if (!videoRect.width || !videoRect.height || !boxRect.width || !boxRect.height) {
+                // fallback: 중앙 80% x 60% 영역
+                return {
+                    sx: Math.round(videoWidth * 0.1),
+                    sy: Math.round(videoHeight * 0.2),
+                    sw: Math.round(videoWidth * 0.8),
+                    sh: Math.round(videoHeight * 0.6)
+                };
+            }
+
+            // object-cover 스케일링으로 인해 화면 밖으로 잘린 비디오 영역 계산
+            const videoAspect = videoWidth / videoHeight;
+            const displayAspect = videoRect.width / videoRect.height;
+
+            let renderWidth, renderHeight, offsetX, offsetY;
+            if (displayAspect > videoAspect) {
+                // 화면이 비디오보다 가로로 더 넓음 -> 위아래가 잘림
+                renderWidth = videoRect.width;
+                renderHeight = videoRect.width / videoAspect;
+                offsetX = 0;
+                offsetY = (renderHeight - videoRect.height) / 2;
+            } else {
+                // 화면이 비디오보다 세로로 더 김 (스마트폰 세로 모드) -> 좌우가 잘림
+                renderHeight = videoRect.height;
+                renderWidth = videoRect.height * videoAspect;
+                offsetX = (renderWidth - videoRect.width) / 2;
+                offsetY = 0;
+            }
+
+            // 화면상의 가이드 박스 좌표를 원본 비디오 픽셀 좌표로 변환
+            let boxLeftOnRender = (boxRect.left - videoRect.left) + offsetX;
+            const boxTopOnRender = (boxRect.top - videoRect.top) + offsetY;
+
+            // 전면 카메라(거울 모드)일 경우 좌우 좌표 반전 보정
+            if (facingMode === 'user') {
+                boxLeftOnRender = renderWidth - (boxLeftOnRender + boxRect.width);
+            }
+
+            const scaleX = videoWidth / renderWidth;
+            const scaleY = videoHeight / renderHeight;
+
+            const sx = Math.max(0, Math.round(boxLeftOnRender * scaleX));
+            const sy = Math.max(0, Math.round(boxTopOnRender * scaleY));
+            const sw = Math.min(videoWidth - sx, Math.round(boxRect.width * scaleX));
+            const sh = Math.min(videoHeight - sy, Math.round(boxRect.height * scaleY));
+
+            return { sx, sy, sw, sh };
+        }
+
+        /**
+         * 현재 비디오 화면의 네모 상자 내부 영역만 캡처하는 함수
          * @param {boolean} autoSolveAfterCapture 캡처 즉시 AI 풀이를 실행할지 여부
          */
         function captureCurrentFrame(autoSolveAfterCapture = false) {
@@ -557,15 +624,13 @@
                 return;
             }
 
-            const videoWidth = videoPreview.videoWidth;
-            const videoHeight = videoPreview.videoHeight;
-
-            if (!videoWidth || !videoHeight) return;
+            const crop = calculateGuideBoxCrop();
+            if (!crop || crop.sw <= 0 || crop.sh <= 0) return;
 
             // 이미지 리사이징 (API 전송 최적화: 최대 1600px)
             const maxDim = 1600;
-            let targetWidth = videoWidth;
-            let targetHeight = videoHeight;
+            let targetWidth = crop.sw;
+            let targetHeight = crop.sh;
 
             if (targetWidth > maxDim || targetHeight > maxDim) {
                 if (targetWidth > targetHeight) {
@@ -587,9 +652,14 @@
                 ctx.scale(-1, 1);
             }
             
-            ctx.drawImage(videoPreview, 0, 0, targetWidth, targetHeight);
+            // 네모 상자 영역(crop.sx, crop.sy, crop.sw, crop.sh)만 잘라서 캔버스에 그리기
+            ctx.drawImage(
+                videoPreview,
+                crop.sx, crop.sy, crop.sw, crop.sh,
+                0, 0, targetWidth, targetHeight
+            );
 
-            const dataUrl = captureCanvas.toDataURL('image/jpeg', 0.85);
+            const dataUrl = captureCanvas.toDataURL('image/jpeg', 0.9);
             setCapturedPreview(dataUrl, 'image/jpeg');
 
             if (autoSolveAfterCapture) {
